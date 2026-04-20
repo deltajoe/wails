@@ -141,6 +141,10 @@ func Build(options *Options) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
+		if err := syncFrontendAssetsToEmbedDir(options); err != nil {
+			return "", err
+		}
 	}
 
 	compileBinary := ""
@@ -190,6 +194,89 @@ func CreateEmbedDirectories(cwd string, buildOptions *Options) error {
 	}
 
 	return nil
+}
+
+func syncFrontendAssetsToEmbedDir(buildOptions *Options) error {
+	if buildOptions.ProjectData == nil {
+		return nil
+	}
+	projectPath := buildOptions.ProjectData.Path
+	frontendDir := buildOptions.ProjectData.GetFrontendDir()
+
+	defaultFrontendDir := filepath.Join(projectPath, "frontend")
+	if frontendDir == defaultFrontendDir {
+		return nil
+	}
+
+	embedDetails, err := staticanalysis.GetEmbedDetails(projectPath)
+	if err != nil {
+		return err
+	}
+
+	return syncAssetsToEmbedPaths(frontendDir, projectPath, embedDetails)
+}
+
+func syncAssetsToEmbedPaths(frontendDir string, projectPath string, embedDetails []*staticanalysis.EmbedDetails) error {
+	defaultFrontendDir := filepath.Join(projectPath, "frontend")
+	for _, embedDetail := range embedDetails {
+		fullPath := embedDetail.GetFullPath()
+		if filepath.Ext(fullPath) != "" {
+			continue
+		}
+		embedRelPath, err := filepath.Rel(projectPath, fullPath)
+		if err != nil {
+			continue
+		}
+		subPath, err := filepath.Rel(defaultFrontendDir, fullPath)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(subPath, "..") {
+			continue
+		}
+		sourceDir := filepath.Join(frontendDir, subPath)
+		if !fs.DirExists(sourceDir) {
+			continue
+		}
+		entries, err := os.ReadDir(sourceDir)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		embedTargetPath := filepath.Join(defaultFrontendDir, subPath)
+		if embedTargetPath == sourceDir {
+			continue
+		}
+		if err := os.MkdirAll(embedTargetPath, 0o755); err != nil {
+			return fmt.Errorf("failed to create embed directory %s: %w", embedTargetPath, err)
+		}
+		if err := copyDir(sourceDir, embedTargetPath); err != nil {
+			return fmt.Errorf("failed to sync frontend assets from %s to %s: %w", sourceDir, embedTargetPath, err)
+		}
+		_ = embedRelPath
+	}
+
+	return nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(targetPath, data, info.Mode())
+	})
 }
 
 func fatal(message string) {
